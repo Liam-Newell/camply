@@ -114,6 +114,85 @@ service that lists camping and recreation inventory.
 Run **`camply providers`** to list current providers and visit the [Providers](https://juftin.com/camply/providers/)
 section in the docs to learn more.
 
+## Canada Campsites Extension (`canada-campsites`)
+
+An additive extension adds a `camply canada-campsites` subcommand that wraps the
+existing `GoingToCamp` provider (Parks Canada, BC Parks, several Ontario regions,
+Nova Scotia, Manitoba, New Brunswick, Newfoundland & Labrador and Gatineau Park)
+with two **post-search** filters layered on top of camply's normal results — no
+existing provider, search or notification code is modified.
+
+* **Radius filter** — keep only campsites within `--radius-km` (default `100`) of
+  `--near "lat,lng"` or `--near-place "Toronto"` (built-in lookup table of
+  common Canadian cities, no online geocoder required).
+* **Amenity toggles** — `--require outlet` (electrical hookup for an EV / Tesla),
+  `--require water`, `--require scenic`, `--require group`, `--exclude group`,
+  `--group-only / --no-group`, etc. Run `camply canada-campsites --help` to see
+  every toggle.
+
+Everything else (`--start-date`, `--end-date`, `--notifications`, `--search-forever`,
+`--yaml-config`, `--equipment-id`, etc.) behaves exactly like `camply campsites`.
+
+```commandline
+camply canada-campsites \
+    --rec-area 1 \
+    --start-date 2026-06-15 \
+    --end-date 2026-09-15 \
+    --near-place Toronto \
+    --radius-km 200 \
+    --require outlet \
+    --notifications email \
+    --search-forever
+```
+
+A complete YAML example lives in
+[`docs/examples/canada_campsites.yaml`](docs/examples/canada_campsites.yaml).
+
+### Multiple email recipients
+
+camply's email notifier already supports multiple recipients — set
+`EMAIL_TO_ADDRESS` to a comma-separated list:
+
+```bash
+EMAIL_TO_ADDRESS="me@example.com,partner@example.com"
+```
+
+Each notification includes the campsite's booking URL so recipients can click
+straight through to reserve.
+
+### Running on a low-power server
+
+camply is pure Python and small enough to run on a Raspberry Pi or any
+always-on box without Docker:
+
+```bash
+pipx install camply
+# Put credentials, EMAIL_TO_ADDRESS, etc. in ~/.camply/config or a .env file.
+tmux new -s camply 'camply canada-campsites --yaml-config ~/canada_campsites.yaml'
+# Detach with Ctrl-b d. Reattach any time with `tmux attach -t camply`.
+```
+
+For unattended restart on reboot, drop a minimal `systemd` user unit at
+`~/.config/systemd/user/camply.service`:
+
+```ini
+[Unit]
+Description=camply canada-campsites watcher
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/camply canada-campsites --yaml-config %h/canada_campsites.yaml
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+```
+
+Then `systemctl --user enable --now camply.service`. Docker is available
+(see [`Dockerfile`](Dockerfile)) but is unnecessary for this use case
+because camply has no native services to isolate.
+
 ## Documentation
 
 Head over to the [camply documentation](https://juftin.com/camply/) to see what you can do!

@@ -55,7 +55,7 @@ twilio = [
 ]
 
 [project.scripts]
-camply = "camply.cli:cli"
+camply = "camply.__main__:cli"
 
 [project.urls]
 Changelog = "https://github.com/juftin/camply/releases"
