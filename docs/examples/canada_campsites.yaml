@@ -1,0 +1,63 @@
+# Example canada-campsites configuration.
+#
+# Drop this file on your low-power server, edit the values for your
+# trip, and run:
+#
+#     camply canada-campsites --yaml-config ~/canada_campsites.yaml
+#
+# Tip: wrap the command in tmux so you can detach the terminal and let
+# it run for days:
+#
+#     tmux new -s camply 'camply canada-campsites --yaml-config ~/canada_campsites.yaml'
+#
+# The existing camply YAML keys (provider, recreation_area, start_date,
+# end_date, nights, notifications, etc.) work exactly the same as for
+# the built-in `camply campsites` command. The new optional `filters:`
+# block is the only extra section.
+#
+# Notifications: set EMAIL_TO_ADDRESS to a comma-separated list of
+# addresses to email multiple people (e.g.
+# "me@example.com,partner@example.com") — this is built into camply's
+# email notifier.
+
+provider: GoingToCamp
+recreation_area: 1                  # Parks Canada (use `camply recreation-areas --provider GoingToCamp` to list)
+start_date: 2026-06-15
+end_date: 2026-09-15
+nights: 2
+continuous: true
+search_forever: true
+polling_interval: 15
+notifications: email
+
+filters:
+  # Centre of the radius — either a named city...
+  near_place: Toronto
+  # ...or an explicit lat/lng (overrides near_place when both set):
+  # near: "43.6532,-79.3832"
+
+  # Maximum great-circle distance from the centre in kilometres.
+  radius_km: 200                    # ~2-3 hours of Toronto
+
+  # Amenity toggles a campsite MUST have. Common keys:
+  #   outlet / electric / power / hydro — electrical hookup for EV / Tesla
+  #   water, sewer
+  #   group        — restrict to group sites (also see group_only below)
+  #   pet_friendly / pets
+  #   scenic / view — soft "nice view" toggle
+  #   shower, fire_pit
+  require:
+    - outlet
+
+  # Optional amenity toggles a campsite must NOT have.
+  # exclude:
+  #   - group
+
+  # Tri-state group filter: true = only group sites, false = exclude
+  # group sites, omit for no filtering.
+  group_only: false
+
+  # When true (default) campsites whose provider did not include
+  # coordinates are dropped (they cannot be evaluated against the
+  # radius). Set to false to keep them.
+  # drop_when_no_location: true
