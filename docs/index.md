@@ -38,6 +38,8 @@ to book your spot!
     - [RecreationDotGov](providers.md#recreationgov)
     - [Yellowstone](providers.md#yellowstone)
     - [GoingToCamp](providers.md#goingtocamp)
+- [Canadian Campsites 🇨🇦](canada_campsites.md) — radius + amenity
+  filters on top of `GoingToCamp`
     - [RecDotGov Tours + Tickets + Timed Entry](providers.md#recreationgov-tickets-tours-timed-entry)
 - [Command Line Usage](command_line_usage.md)
     - [Simple Examples](command_line_usage.md#simple-examples)

@@ -1,0 +1,415 @@
+"""
+Combined GoingToCamp + Reserve Ontario outlet report.
+
+Extends the original ``canada_outlet_report.py`` to also cover Ontario
+Parks (``reservations.ontarioparks.ca``, rec-area 18) on top of the
+three Toronto-area conservation-authority rec-areas (1 Long Point,
+4 Maitland Valley, 8 Algonquin Highlands).
+
+Outputs ``ontario_outlet_weekends.md`` — one big Markdown file with a
+clickable Table of Contents at the top jumping to each weekend. Same
+layout as ``toronto_outlet_weekends.md``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
+from fake_useragent import UserAgent
+
+from camply.containers import AvailableCampsite, SearchWindow
+from camply.extensions.canada_filters.chunked_search import (
+    WeekendChunkedSearchGoingToCamp,
+)
+from camply.extensions.ontario_parks.parks import ONTARIO_PARKS
+from camply.providers.going_to_camp.going_to_camp_provider import GoingToCamp
+from camply.search.search_going_to_camp import SearchGoingToCamp
+
+# Re-use the proven helpers from the original report verbatim. Anything
+# we don't redefine below behaves exactly like the Toronto-only report.
+from scripts.canada_outlet_report import (
+    CAMPGROUND_RATINGS,
+    DEFAULT_REC_AREA_RATING,
+    LONG_WEEKEND_SATS,
+    _rating,
+    _score,
+    fetch_attribute_decoder,
+    fmt_weekend_header,
+    weekend_anchor,
+)
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("ontario-outlet-report")
+log.setLevel(logging.INFO)
+
+TODAY = date.today()
+END = date(2026, 9, 30)
+# Originals (1=Long Point, 4=Maitland Valley, 8=Algonquin Highlands) +
+# 18=Ontario Parks (new extension).
+REC_AREAS: List[int] = [1, 4, 8, 18]
+OUTPUT_PATH = Path("ontario_outlet_weekends.md")
+UA = UserAgent().chrome
+
+# Top up the rec-area rating table with an Ontario-Parks entry. (The
+# imported `DEFAULT_REC_AREA_RATING` is mutated in-place — fine for a
+# one-shot script.)
+DEFAULT_REC_AREA_RATING.setdefault(
+    18,
+    {
+        "view": 5,
+        "trails": 5,
+        "location": 3,
+        "summary": (
+            "Reserve Ontario — every reservable provincial park in the system "
+            "(93 parks). Drive time from Toronto ranges from ~1 hr "
+            "(Sibbald Point, Earl Rowe) to 14+ hr (Quetico, Sleeping Giant)."
+        ),
+    },
+)
+
+
+def fetch_site_catalogue(host: str, rl_id: int) -> Dict[int, Dict[str, Any]]:
+    """
+    Same shape as ``scripts.canada_outlet_report.fetch_site_catalogue``,
+    but reads ``localizedValues[0]`` with a ``name → fullName → shortName``
+    fallback chain. Reserve Ontario omits the ``name`` key and only
+    populates ``fullName`` / ``shortName`` — the original helper would
+    fall through to the ``#-21474…`` placeholder for every OP site.
+    """
+    url = f"https://{host}/api/resourcelocation/resources?resourceLocationId={rl_id}"
+    r = requests.get(
+        url,
+        headers={"User-Agent": UA, "Accept": "application/json"},
+        timeout=30,
+    )
+    r.raise_for_status()
+    out: Dict[int, Dict[str, Any]] = {}
+    for rid_str, payload in r.json().items():
+        try:
+            rid_i = int(rid_str)
+        except ValueError:
+            continue
+        loc = payload.get("localizedValues") or [{}]
+        first = loc[0] if loc else {}
+        name = (
+            first.get("name")
+            or first.get("fullName")
+            or first.get("shortName")
+            or f"#{rid_i}"
+        )
+        defined: Dict[int, Any] = {}
+        for attr in payload.get("definedAttributes") or ():
+            did = attr.get("attributeDefinitionId")
+            vals = attr.get("values") or []
+            if did is not None and vals:
+                defined[did] = vals[0]
+        out[rid_i] = {"name": name, "defined": defined}
+    return out
+
+
+def run_weekend_chunked(rid: int, cg_ids: List[int]) -> List[AvailableCampsite]:
+    win = SearchWindow(start_date=TODAY, end_date=END)
+    s = WeekendChunkedSearchGoingToCamp(
+        search_window=win,
+        recreation_area=[rid],
+        campgrounds=cg_ids,
+        weekends_only=True,
+        nights=2,
+    )
+    return s.get_all_campsites()
+
+
+def run_long_weekend(
+    rid: int, cg_ids: List[int], sat: date
+) -> List[AvailableCampsite]:
+    end = sat + timedelta(days=3)
+    win = SearchWindow(start_date=sat, end_date=end)
+    s = SearchGoingToCamp(
+        search_window=win,
+        recreation_area=[rid],
+        campgrounds=cg_ids,
+        weekends_only=False,
+        nights=3,
+    )
+    return s.get_all_campsites()
+
+
+def main() -> None:
+    log.info("scanning rec areas %s, %s → %s", REC_AREAS, TODAY, END)
+    provider = GoingToCamp()
+
+    decoders: Dict[int, Dict[int, Dict[str, Any]]] = {}
+    rec_cgs: Dict[int, List[Any]] = {}
+    catalogues: Dict[Tuple[int, int], Dict[int, Dict[str, Any]]] = {}
+    elec_def: Dict[int, Optional[int]] = {}
+    stype_def: Dict[int, Optional[int]] = {}
+
+    for rid in REC_AREAS:
+        try:
+            decoders[rid] = fetch_attribute_decoder(provider, rid)
+        except Exception as e:
+            log.warning("rec-area %s: filter attrs unavailable (%s)", rid, e)
+            decoders[rid] = {}
+        e_id = s_id = None
+        for aid, info in decoders[rid].items():
+            nm = info["name"].lower()
+            if "electric" in nm and "service" in nm:
+                e_id = aid
+            elif nm.strip() == "service type":
+                s_id = aid
+        elec_def[rid] = e_id
+        stype_def[rid] = s_id
+        log.info("rec-area %s electrical=%s service_type=%s", rid, e_id, s_id)
+
+        try:
+            cgs = provider.find_campgrounds(rec_area_id=rid)
+        except Exception as e:
+            log.warning("rec-area %s find_campgrounds (%s)", rid, e)
+            cgs = []
+        # Sanity check for rec-area 18: the extension catalogue and the
+        # live provider should agree on the campground count.
+        if rid == 18:
+            expected = len(ONTARIO_PARKS)
+            if len(cgs) != expected:
+                log.warning(
+                    "rec-area 18: provider returned %d cgs, extension catalogue has %d",
+                    len(cgs),
+                    expected,
+                )
+        rec_cgs[rid] = cgs
+        host = provider._hostname_for(rid)
+        log.info("rec-area %s host=%s campgrounds=%d", rid, host, len(cgs))
+        for cg in cgs:
+            try:
+                catalogues[(rid, cg.facility_id)] = fetch_site_catalogue(
+                    host, cg.facility_id
+                )
+            except Exception as e:
+                log.warning("cg %s catalogue fetch (%s)", cg.facility_name, e)
+                catalogues[(rid, cg.facility_id)] = {}
+
+    raw: List[Tuple[int, AvailableCampsite]] = []
+    for rid in REC_AREAS:
+        cg_ids = [cg.facility_id for cg in rec_cgs[rid]]
+        if not cg_ids:
+            continue
+        log.info(
+            "rec-area %s Fri-Sun chunked across %d campground(s)", rid, len(cg_ids)
+        )
+        try:
+            for ac in run_weekend_chunked(rid, cg_ids):
+                raw.append((rid, ac))
+        except Exception as e:
+            log.warning("rec-area %s chunked failed (%s)", rid, e)
+
+    for sat, label in LONG_WEEKEND_SATS.items():
+        if sat < TODAY or sat > END:
+            continue
+        for rid in REC_AREAS:
+            cg_ids = [cg.facility_id for cg in rec_cgs[rid]]
+            if not cg_ids:
+                continue
+            log.info("rec-area %s long-weekend %s", rid, label)
+            try:
+                for ac in run_long_weekend(rid, cg_ids, sat):
+                    raw.append((rid, ac))
+            except Exception as e:
+                log.warning(
+                    "rec-area %s long-weekend %s failed (%s)", rid, sat, e
+                )
+
+    log.info("raw availability records: %d", len(raw))
+
+    kept: List[Dict[str, Any]] = []
+    no_outlet = no_meta = 0
+    for rid, ac in raw:
+        did = elec_def[rid]
+        sid = int(ac.campsite_id)
+        meta = catalogues.get((rid, int(ac.facility_id)), {}).get(sid)
+        if did is None or not meta:
+            no_meta += 1
+            continue
+        enum = meta["defined"].get(did)
+        # On the conservation-authority tenants enum=0 means 15 A, but on
+        # Reserve Ontario enum=0 means 15 A too — both tenants share the
+        # "0 = 15 A, 1 = 30 A, …" convention. None / missing means the
+        # site has no electrical attribute set, which is the only thing
+        # we filter out here.
+        if enum is None:
+            no_outlet += 1
+            continue
+        # Drop the 'Non-Electric' Service Type. On OP that's stype enum 0.
+        s_id = stype_def[rid]
+        if s_id is not None:
+            se = meta["defined"].get(s_id)
+            if se == 0:
+                no_outlet += 1
+                continue
+        elec = decoders[rid].get(did, {}).get("values", {}).get(
+            enum, f"enum={enum}"
+        )
+        svc = None
+        if s_id is not None:
+            se = meta["defined"].get(s_id)
+            if se is not None:
+                svc = decoders[rid][s_id]["values"].get(se, f"enum={se}")
+        kept.append(
+            {
+                "rid": rid,
+                "ac": ac,
+                "site_name": meta["name"],
+                "electrical": elec,
+                "service_type": svc,
+            }
+        )
+
+    log.info(
+        "kept %d / no-outlet %d / no-meta %d", len(kept), no_outlet, no_meta
+    )
+
+    by_wknd: Dict[Tuple[date, int], List[Dict[str, Any]]] = defaultdict(list)
+    for k in kept:
+        bd = k["ac"].booking_date
+        d = bd.date() if hasattr(bd, "date") else bd
+        by_wknd[(d, k["ac"].booking_nights)].append(k)
+
+    lines: List[str] = []
+    lines.append("# Ontario GoingToCamp + Reserve Ontario — sites with electrical outlets")
+    lines.append("")
+    lines.append(f"_Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}_  ")
+    lines.append(
+        f"_Scope: rec-areas {REC_AREAS} — the three Toronto-area conservation "
+        f"authorities (Long Point, Maitland Valley, Algonquin Highlands) **plus** "
+        f"all {len(ONTARIO_PARKS)} reservable Reserve Ontario provincial parks "
+        f"(rec-area 18, ``reservations.ontarioparks.ca``). Every Fri-Sun weekend "
+        f"plus the two long weekends until {END.isoformat()}._"
+    )
+    lines.append("")
+    lines.append("## How to read this report")
+    lines.append("")
+    lines.append(
+        "- **Outlet data** comes from each tenant's `/api/resourcelocation/resources` "
+        "JSON endpoint, decoded against `/api/attribute/filterable`. Sites whose "
+        "**Electrical Service** attribute is unset (or whose Service Type is "
+        "**Non-Electric**) are excluded."
+    )
+    lines.append(
+        "- **Sort order:** weekends chronologically; within each weekend, "
+        "campgrounds are sorted by a curated subjective score (view + trails + "
+        "location, 1–5 each, averaged). Reserve Ontario parks fall back to the "
+        "rec-area 18 average — feel free to override individual parks in "
+        "``scripts/canada_outlet_report.CAMPGROUND_RATINGS``."
+    )
+    lines.append(
+        "- **Long weekends** (Sat-Mon, 3 nights) are listed in addition to their "
+        "parent Fri-Sun weekend, not instead of it."
+    )
+    lines.append(
+        "- Each **Book** link opens the booking results page on the correct date "
+        "range. For Reserve Ontario parks the link points at "
+        "``reservations.ontarioparks.ca``."
+    )
+    lines.append("")
+    lines.append("## Rec-area summary")
+    lines.append("")
+    lines.append("| Rec area | Subjective rating (V/T/L) | Notes |")
+    lines.append("|---|---|---|")
+    for rid in REC_AREAS:
+        base = DEFAULT_REC_AREA_RATING.get(
+            rid, {"view": 3, "trails": 3, "location": 3, "summary": "—"}
+        )
+        cgs = rec_cgs.get(rid) or []
+        name = cgs[0].recreation_area if cgs else f"rec-area {rid}"
+        lines.append(
+            f"| **{name}** (#{rid}) | "
+            f"{base['view']} / {base['trails']} / {base['location']} | "
+            f"{base['summary']} |"
+        )
+    lines.append("")
+    lines.append(
+        "> _**Rec-area 5 (Saugeen Valley)** was skipped: its tenant subdomain "
+        "`saugeen.goingtocamp.com` is not currently resolving upstream._"
+    )
+    lines.append(
+        "> _**Rec-area 8 (Algonquin Highlands)** is in scope but produced 0 outlet "
+        "matches in the original Toronto report: its two campgrounds (Frost Centre "
+        "Area, Poker Lakes Area) are interior canoe-camping zones and do not "
+        "expose an Electrical Service attribute. Algonquin **Provincial Park** "
+        "(Mew Lake, Pog Lake, Lake of Two Rivers, Canisbay, Achray, Brent, Kiosk, "
+        "Rock Lake, Tea Lake, Whitefish Lake) lives under rec-area 18 and DOES "
+        "report electrical service._"
+    )
+    lines.append("")
+
+    lines.append('<a id="weekends-jump-to"></a>')
+    lines.append("## Weekends (jump to)")
+    lines.append("")
+    sorted_w = sorted(by_wknd.keys())
+    for d, nights in sorted_w:
+        lines.append(
+            f"- [{fmt_weekend_header(d, nights)}](#{weekend_anchor(d, nights)}) — "
+            f"**{len(by_wknd[(d, nights)])}** sites with outlets"
+        )
+    if not sorted_w:
+        lines.append("_No outlet-bearing sites available in the search window._")
+    lines.append("")
+
+    for d, nights in sorted_w:
+        lines.append(f'<a id="{weekend_anchor(d, nights)}"></a>')
+        lines.append(f"## {fmt_weekend_header(d, nights)}")
+        lines.append("")
+        entries = by_wknd[(d, nights)]
+        per_cg: Dict[Tuple[int, str], List[Dict[str, Any]]] = defaultdict(list)
+        for e in entries:
+            per_cg[(e["rid"], e["ac"].facility_name)].append(e)
+        cg_order = sorted(
+            per_cg.keys(),
+            key=lambda k: (-_score(_rating(k[1], k[0])), k[1]),
+        )
+        for rid, cg_name in cg_order:
+            rating = _rating(cg_name, rid)
+            score = _score(rating)
+            city = rating.get("city", "—")
+            notes = rating.get("notes", "")
+            lines.append(
+                f"### ⛺ {cg_name}  "
+                f"<sub>rating {score:.1f}/5 · view {rating['view']} · "
+                f"trails {rating['trails']} · location {rating['location']} · "
+                f"{city} · rec-area #{rid}</sub>"
+            )
+            if notes:
+                lines.append(f"_{notes}_")
+            lines.append("")
+            for e in sorted(
+                per_cg[(rid, cg_name)], key=lambda e: str(e["site_name"])
+            ):
+                svc = f" · {e['service_type']}" if e["service_type"] else ""
+                lines.append(
+                    f"- **Site {e['site_name']}** — {e['electrical']}{svc} — "
+                    f"[Book]({e['ac'].booking_url})"
+                )
+            lines.append("")
+        lines.append("[↑ back to weekend index](#weekends-jump-to)")
+        lines.append("")
+
+    OUTPUT_PATH.write_text("\n".join(lines), encoding="utf-8")
+    log.info(
+        "wrote %s (%d weekends, %d outlet sites)",
+        OUTPUT_PATH,
+        len(sorted_w),
+        len(kept),
+    )
+
+
+if __name__ == "__main__":
+    main()

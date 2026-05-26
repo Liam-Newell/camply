@@ -91,4 +91,9 @@ RECREATION_AREAS = {
         recreation_area_id=17,
         recreation_area_location="Michigan, USA",
     ),
+    "reservations.ontarioparks.ca": RecreationArea(
+        recreation_area="Ontario Parks",
+        recreation_area_id=18,
+        recreation_area_location="Ontario, CA",
+    ),
 }

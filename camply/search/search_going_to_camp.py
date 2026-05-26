@@ -4,7 +4,7 @@ Going To Camp API search utilities
 
 import logging
 import sys
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Any, List, Optional, Union
 
 from camply.containers import (
@@ -151,9 +151,18 @@ class SearchGoingToCamp(BaseCampingSearch):
                     site_details = self.campsite_finder.get_site_details(
                         self._recreation_area_id, site.resource_id
                     )
-                    nights = (search_window.end_date - current_start_date).days
+                    window_nights = (search_window.end_date - current_start_date).days
+                    effective_nights = self.nights or window_nights or 1
+                    # GoingToCamp returns yes/no for the whole requested
+                    # window, so any subset of that window is also bookable.
+                    # Surface the user's requested --nights window instead of
+                    # the full search horizon so the booking URL and dates
+                    # match what they actually want to reserve.
+                    booking_end_date = current_start_date + timedelta(
+                        days=effective_nights
+                    )
                     start_dt = datetime.combine(current_start_date, time.min)
-                    end_dt = datetime.combine(search_window.end_date, time.min)
+                    end_dt = datetime.combine(booking_end_date, time.min)
                     (
                         rec_area_domain_name,
                         rec_area,
@@ -168,7 +177,7 @@ class SearchGoingToCamp(BaseCampingSearch):
                         sub_equipment_id=self.equipment_id,
                         party_size=1,
                         start_date=current_start_date,
-                        end_date=search_window.end_date,
+                        end_date=booking_end_date,
                     )
 
                     # Some rec areas have zero-capacity sites, which should not
@@ -187,7 +196,7 @@ class SearchGoingToCamp(BaseCampingSearch):
                             ],
                             booking_date=start_dt,
                             booking_end_date=end_dt,
-                            booking_nights=nights,
+                            booking_nights=effective_nights,
                             campsite_loop_name="Unknown",
                             campsite_type=site_details["site_attributes"].get(
                                 "Service Type", "Unknown"

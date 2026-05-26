@@ -63,6 +63,14 @@ Unlike other camply providers, when using GoingToCamp you must restrict campgrou
 recreation area. Since recreation areas may list every campground in a state or provincial park system, it feels natural
 to filter searches by recreation area when using GoingToCamp.
 
+!!! tip "Searching Canadian campsites by radius from a city"
+
+    The [`camply canada-campsites`](canada_campsites.md) command wraps
+    `GoingToCamp` with a radius pre-filter and amenity toggles, so you
+    can pass only `--rec-area` and `--near-place Toronto --radius-km 200`
+    and have camply auto-expand the rec-area into the matching
+    campgrounds for you.
+
 Currently, the following recreation areas are supported:
 
 - Parks Canada - Canada National Parks - [reservation.pc.gc.ca](https://reservation.pc.gc.ca/)

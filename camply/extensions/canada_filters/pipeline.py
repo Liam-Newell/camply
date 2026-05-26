@@ -107,6 +107,20 @@ class ToggleFilter:
     def __call__(
         self, campsites: List[AvailableCampsite]
     ) -> List[AvailableCampsite]:
+        if (self.required or self.excluded) and campsites and self._looks_unenriched(
+            campsites
+        ):
+            logger.warning(
+                "Skipping --require/--exclude toggles (%s / %s): the provider "
+                "did not return any campsite attribute data, so attribute "
+                "filtering cannot be evaluated. This typically means the "
+                "GoingToCamp SITE_DETAILS endpoint is currently unavailable. "
+                "Returning %d unfiltered campsites.",
+                list(self.required),
+                list(self.excluded),
+                len(campsites),
+            )
+            return list(campsites)
         kept: List[AvailableCampsite] = []
         for site in campsites:
             if any(not matches_toggle(site, t) for t in self.required):
@@ -122,6 +136,28 @@ class ToggleFilter:
             len(kept),
         )
         return kept
+
+    @staticmethod
+    def _looks_unenriched(campsites: Sequence[AvailableCampsite]) -> bool:
+        """
+        Heuristic: every campsite has no structured attributes and no
+        meaningful ``campsite_type``. When that is the case the
+        attribute-keyword filters have nothing to match against and would
+        drop every site, so the caller is better served by a warning and
+        a pass-through.
+        """
+        for site in campsites:
+            attrs = getattr(site, "campsite_attributes", None) or []
+            if attrs:
+                return False
+            site_type = getattr(site, "campsite_type", None)
+            if site_type and str(site_type).strip().lower() not in {
+                "",
+                "unknown",
+                "none",
+            }:
+                return False
+        return True
 
 
 @dataclass

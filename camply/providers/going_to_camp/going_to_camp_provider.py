@@ -145,6 +145,76 @@ class GoingToCamp(BaseProvider):
                         attribute_enum_detail, "localizedValues", 0, "displayName"
                     )
 
+    def list_filterable_attributes(
+        self, rec_area_id: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Return the attribute taxonomy that GoingToCamp marks as
+        ``isFilterable`` for a given recreation area.
+
+        These are the boolean / enum knobs the live booking site exposes
+        on its left-rail filter panel (e.g. "Electrical Service",
+        "Service Type", "Pad Location"). camply cannot apply them
+        server-side because the per-resource attribute payload
+        (``/api/resource/details``) is no longer served, but enumerating
+        them tells the user exactly what vocabulary the live site
+        understands.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            One dict per filterable attribute with keys ``id`` (int),
+            ``name`` (str), and ``values`` (list of ``{"enum": int,
+            "name": str}``). Empty list if the endpoint is unavailable.
+        """
+        try:
+            raw = self._api_request(rec_area_id, "ATTRIBUTE_DETAILS")
+        except ConnectionError:
+            return []
+        out: List[Dict[str, Any]] = []
+        for _aid, defn in (raw or {}).items():
+            if not defn.get("isFilterable"):
+                continue
+            name = _fetch_nested_key(defn, "localizedValues", 0, "displayName") or "?"
+            values: List[Dict[str, Any]] = []
+            for v in defn.get("values") or []:
+                values.append(
+                    {
+                        "enum": v.get("enumValue"),
+                        "name": _fetch_nested_key(
+                            v, "localizedValues", 0, "displayName"
+                        )
+                        or "?",
+                    }
+                )
+            out.append(
+                {
+                    "id": defn.get("attributeDefinitionId"),
+                    "name": name,
+                    "values": values,
+                }
+            )
+        out.sort(key=lambda d: d["name"])
+        return out
+
+    @staticmethod
+    def _synthesize_site_details(resource_id: int) -> Dict[str, Any]:
+        """
+        Build a minimal site_details payload when the live SITE_DETAILS
+        endpoint is unavailable. The shape matches what
+        :meth:`get_matching_campsites` in the search layer reads so the
+        search still emits valid AvailableCampsite records, just without
+        site-level metadata (loop, capacity, hookup attributes).
+        """
+        return {
+            "resourceId": resource_id,
+            "localizedValues": [{"name": f"Site #{resource_id}"}],
+            "minCapacity": 1,
+            "maxCapacity": 6,
+            "definedAttributes": [],
+            "site_attributes": {},
+        }
+
     def get_site_details(self, rec_area_id: int, resource_id: int):
         """
         Get the details about a site in a recreation area
@@ -160,15 +230,40 @@ class GoingToCamp(BaseProvider):
         details: Dict[str, str]
             The details about the site
         """
+        # The /api/resource/details endpoint was removed from the live
+        # GoingToCamp API (returns 404 across all tenants tested). Cache
+        # that result on the instance so we don't spam the API once we
+        # know enrichment is unavailable.
+        if getattr(self, "_site_details_disabled", False):
+            return self._synthesize_site_details(resource_id)
+
         if not hasattr(self, "_attribute_details"):
-            self._attribute_details = self._api_request(
-                rec_area_id, "ATTRIBUTE_DETAILS"
-            )
+            try:
+                self._attribute_details = self._api_request(
+                    rec_area_id, "ATTRIBUTE_DETAILS"
+                )
+            except ConnectionError:
+                self._attribute_details = {}
+                self._site_details_disabled = True
+                logger.warning(
+                    "GoingToCamp: ATTRIBUTE_DETAILS endpoint unavailable; "
+                    "campsite attribute filtering is disabled for this run."
+                )
+                return self._synthesize_site_details(resource_id)
         attribute_details = self._attribute_details
 
-        site_details = self._api_request(
-            rec_area_id, "SITE_DETAILS", {"resourceId": resource_id}
-        )
+        try:
+            site_details = self._api_request(
+                rec_area_id, "SITE_DETAILS", {"resourceId": resource_id}, quiet=True
+            )
+        except ConnectionError:
+            self._site_details_disabled = True
+            logger.warning(
+                "GoingToCamp: SITE_DETAILS endpoint unavailable; "
+                "campsite names and attribute filtering are disabled for "
+                "this run. Availability information is still reported."
+            )
+            return self._synthesize_site_details(resource_id)
         site_attributes = {}
         for attribute in site_details["definedAttributes"]:
             attribute_detail = attribute_details[
@@ -283,9 +378,29 @@ class GoingToCamp(BaseProvider):
         )
 
         campgrounds = []
-        # Fetch campgrounds details for all facilities
+        # Fetch campground details for all facilities. The API has two
+        # response shapes for this endpoint:
+        #   1. Legacy: one entry per facility, keyed by resourceLocationId.
+        #   2. Current: a single root map per rec-area whose ``mapLinks``
+        #      array enumerates the per-campground child maps. Each link
+        #      carries ``resourceLocationId`` and ``childMapId`` (the
+        #      mapId that the MAPDATA endpoint requires for that
+        #      campground).
+        # We index both shapes so downstream code can still look up a
+        # campground by its resourceLocationId.
         for camp_details in self._api_request(rec_area_id, "CAMP_DETAILS"):
-            self.campground_details[camp_details["resourceLocationId"]] = camp_details
+            rli = camp_details.get("resourceLocationId")
+            if rli is not None:
+                self.campground_details[rli] = camp_details
+            for link in camp_details.get("mapLinks") or []:
+                link_rli = link.get("resourceLocationId")
+                child_map_id = link.get("childMapId")
+                if link_rli is None or child_map_id is None:
+                    continue
+                # Don't clobber a richer legacy entry.
+                self.campground_details.setdefault(
+                    link_rli, {"mapId": child_map_id, "resourceLocationId": link_rli}
+                )
 
         # If a search string is provided, make sure every facility name contains
         # the search string
@@ -325,6 +440,7 @@ class GoingToCamp(BaseProvider):
         rec_area_id: int,
         endpoint_name: str,
         params: Optional[Dict[str, str]] = None,
+        quiet: bool = False,
     ) -> str:
         if params is None:
             params = {}
@@ -341,7 +457,10 @@ class GoingToCamp(BaseProvider):
         response = self.session.get(url=url, headers=headers, params=params, timeout=30)
         if response.ok is False:
             error_message = f"Receiving bad data from GoingToCamp API: status_code: {response.status_code}: {response.text}"
-            logger.error(error_message)
+            if quiet:
+                logger.debug(error_message)
+            else:
+                logger.error(error_message)
             raise ConnectionError(error_message)
 
         return json.loads(response.content)
@@ -379,6 +498,23 @@ class GoingToCamp(BaseProvider):
 
                 region_name = _fetch_nested_key(facil, "region")
 
+                gps_raw = facil.get("gpsCoordinates")
+                gps_coords: Optional[Tuple[float, float]] = None
+                if isinstance(gps_raw, str) and gps_raw.strip():
+                    try:
+                        lat_str, lng_str = (p.strip() for p in gps_raw.split(","))
+                        gps_coords = (float(lat_str), float(lng_str))
+                    except (ValueError, TypeError):
+                        gps_coords = None
+                elif isinstance(gps_raw, dict):
+                    lat = gps_raw.get("latitude")
+                    lng = gps_raw.get("longitude")
+                    if lat is not None and lng is not None:
+                        try:
+                            gps_coords = (float(lat), float(lng))
+                        except (ValueError, TypeError):
+                            gps_coords = None
+
                 facility = ResourceLocation(
                     id=None,
                     region_name=region_name if region_name else "",
@@ -387,6 +523,7 @@ class GoingToCamp(BaseProvider):
                     resource_categories=facil.get("resourceCategoryIds"),
                     resource_location_id=facil.get("resourceLocationId"),
                     resource_location_name=location_name,
+                    gps_coordinates=gps_coords,
                 )
             except ValidationError as ve:
                 logger.error("That doesn't look like a valid Campground Facility")
@@ -424,10 +561,21 @@ class GoingToCamp(BaseProvider):
         -------
         Tuple[dict, CampgroundFacility]
         """
-        self.campground_details[facility.resource_location_id]
-        facility.id = _fetch_nested_key(
-            self.campground_details, facility.resource_location_id, "mapId"
-        )
+        if facility.resource_location_id in self.campground_details:
+            facility.id = _fetch_nested_key(
+                self.campground_details, facility.resource_location_id, "mapId"
+            )
+        else:
+            # Some rec-areas (e.g. Parks Canada) list facilities in
+            # LIST_CAMPGROUNDS that have no matching CAMP_DETAILS entry.
+            # Keep the facility — map_id is only used for booking URL
+            # construction at search time — instead of dropping it.
+            logger.debug(
+                "No campground detail for resource_location_id=%s (%s); "
+                "using map_id=None.",
+                facility.resource_location_id,
+                facility.resource_location_name,
+            )
         if facility.region_name:
             formatted_recreation_area = (
                 f"{rec_area.recreation_area}, {facility.region_name}"
@@ -441,6 +589,7 @@ class GoingToCamp(BaseProvider):
             facility_id=facility.resource_location_id,
             recreation_area_id=facility.rec_area_id,
             map_id=facility.id,
+            coordinates=facility.gps_coordinates,
         )
         return facility, campground_facility
 

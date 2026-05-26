@@ -10,5 +10,6 @@ package registers any new CLI commands defined under it on the main
 # Importing the sub-package registers its CLI command on
 # ``camply.cli.camply_command_line`` as a side effect.
 from camply.extensions import canada_filters  # noqa: F401
+from camply.extensions import ontario_parks  # noqa: F401
 
-__all__ = ["canada_filters"]
+__all__ = ["canada_filters", "ontario_parks"]

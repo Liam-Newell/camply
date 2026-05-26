@@ -1,7 +1,7 @@
 """
 GoingToCamp provider containers
 """
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from camply.containers.base_container import CamplyModel
 
@@ -18,3 +18,4 @@ class ResourceLocation(CamplyModel):
     resource_location_id: Optional[int]
     resource_location_name: str
     region_name: str
+    gps_coordinates: Optional[Tuple[float, float]] = None
