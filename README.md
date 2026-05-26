@@ -148,6 +148,46 @@ camply canada-campsites \
 A complete YAML example lives in
 [`docs/examples/canada_campsites.yaml`](docs/examples/canada_campsites.yaml).
 
+## Ontario Parks Extension (`ontario-parks`)
+
+A second additive extension adds `camply ontario-parks`, a thin wrapper around
+`canada-campsites` targeting [`reservations.ontarioparks.ca`](https://reservations.ontarioparks.ca/) —
+the booking system for every reservable Ontario provincial park (Algonquin,
+Killbear, Killarney, Bon Echo, Sandbanks, Arrowhead, Frontenac, Silent Lake,
+MacGregor Point, Awenda, Restoule, Sibbald Point, and 80+ more).
+
+Reserve Ontario runs the same Aspira/CampIT backend as every GoingToCamp
+tenant, so the existing `GoingToCamp` provider and the `canada-campsites`
+pipeline cover it as-is. This subcommand just:
+
+* preselects `--rec-area 18` (the synthetic rec-area assigned to the Ontario
+  Parks tenant) so you don't have to think about it,
+* adds a `--park NAME` shortcut (repeatable, substring-match,
+  case-insensitive) so `--park Killbear` resolves to the right
+  `resourceLocationId` and `--park Algonquin` expands to all 10 Algonquin
+  frontcountry campgrounds automatically.
+
+```commandline
+camply ontario-parks \
+    --park Killbear \
+    --start-date 2026-06-15 \
+    --end-date 2026-09-15 \
+    --require outlet \
+    --notifications email \
+    --search-forever
+```
+
+Run `camply ontario-parks --list-parks` for the full park catalogue and
+`camply ontario-parks --park Killbear --list-filters` to see every Reserve
+Ontario filterable attribute (Electrical Service, Service Type, Privacy, Site
+Shade, Pull-through, etc.). Every other flag (`--nights`, `--weekends`,
+`--near-place`, `--radius-km`, `--yaml-config`, `--equipment-id`,
+`--notifications`, …) behaves exactly like `canada-campsites`.
+
+A full repo-root crawler at [`scripts/ontario_outlet_report.py`](scripts/ontario_outlet_report.py)
+generates a single Markdown file listing every outlet-equipped site available
+across every weekend (plus the two long weekends) through end of September.
+
 ### Multiple email recipients
 
 camply's email notifier already supports multiple recipients — set
