@@ -309,7 +309,11 @@ class GoingToCamp(BaseProvider):
 
         """
         if not sub_equipment_id:
-            sub_equipment_id = ""
+            # Reserve Ontario stalls on the equipment-picker step when
+            # subEquipmentId is empty; sending the same `-32768` "any"
+            # sentinel as equipmentId makes the SPA jump straight to the
+            # results page on every GoingToCamp tenant.
+            sub_equipment_id = equipment_id
 
         return (
             "https://%s/create-booking/results?mapId=%s"
